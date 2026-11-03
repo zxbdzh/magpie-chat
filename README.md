@@ -18,6 +18,27 @@ magpie plugin add @magpie-community/page-chat
 
 It then has a tab, **Chat** (对话, 對話, チャット), under Plugins in the sidebar.
 
+## 安装本仓库版本
+
+如果要安装本仓库维护的版本，而不是插件市场里的上游包，请在已安装 Magpie 的终端执行：
+
+```sh
+# 如果之前装过上游 Chat，先关掉并移除，避免同一个页面插件重复加载
+magpie plugin off "@magpie-community/page-chat@latest"
+magpie plugin rm "@magpie-community/page-chat@latest"
+
+# 安装当前已验证的 fork 版本（固定提交，避免后续 main 变化影响安装结果）
+magpie plugin add "github:zxbdzh/magpie-chat#61b31d2a776fa2bb20850d9ea99defacd6a4e2af"
+```
+
+安装完成后重启 Magpie；插件页面仍显示为 **Chat**。如果你希望跟随 fork 的最新 `main`，可以把最后一行改为：
+
+```sh
+magpie plugin add "github:zxbdzh/magpie-chat#main"
+```
+
+更新 fork 版本时，先执行 `magpie plugin rm "github:zxbdzh/magpie-chat"`，再重新执行上面的 `magpie plugin add`。当前 fork 不需要发布 npm 包，也不会把本地路径发送给别人。
+
 ## What it does
 
 - **magpie's models.** The list comes from the gateway's `/v1/models`. Models with reasoning levels get an effort picker. Each model shows its brand icon (OpenAI, Claude, Gemini, DeepSeek, Qwen, Kimi, GLM, MiniMax and more) in the picker and next to its name in the transcript. The icons come from [@lobehub/icons](https://github.com/lobehub/lobe-icons) (MIT); see `chat/icons/models/NOTICE`.

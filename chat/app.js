@@ -567,9 +567,11 @@ var state = {
   boot: null,
   settings: {
     model: "", effort: "", system: "", instructions: [], skills: [], mcp: [],
+    imageGeneration: { enabled: false, server: "", tool: "generate_image", model: "", models: [] },
     temperature: 0.7, maxTokens: 0, showReasoning: true
   },
   models: [],
+  imageTools: [],
   library: { instructions: [], skills: [], mcp: [] },
   conversations: [],
   messages: [],
@@ -746,12 +748,13 @@ function patchSettings(patch) {
   saveTimer = setTimeout(flushSettings, 320);
 }
 
-function flushSettings() {
+function flushSettings(strict) {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   return api("api/settings", { method: "POST", body: state.settings }).then(function (saved) {
     state.settings = Object.assign({}, state.settings, saved || {});
   }).catch(function (err) {
     toast("设置保存失败：" + err.message, true);
+    if (strict === true) throw err;
   });
 }
 
@@ -765,6 +768,7 @@ function applySettings(raw) {
     instructions: Array.isArray(s.instructions) ? s.instructions.slice() : [],
     skills: Array.isArray(s.skills) ? s.skills.slice() : [],
     mcp: Array.isArray(s.mcp) ? s.mcp.slice() : [],
+    imageGeneration: Object.assign({ enabled: false, server: "", tool: "generate_image", model: "", models: [] }, s.imageGeneration || {}),
     temperature: isFinite(Number(s.temperature)) ? Number(s.temperature) : 0.7,
     maxTokens: isFinite(Number(s.maxTokens)) ? Number(s.maxTokens) : 0,
     showReasoning: s.showReasoning !== false,
@@ -806,6 +810,7 @@ function renderPills() {
     || (s.instructions || []).length > 0
     || (s.skills || []).length > 0
     || (s.mcp || []).length > 0
+    || Boolean(s.imageGeneration && s.imageGeneration.enabled)
     || Number(s.temperature) !== 0.7
     || Number(s.maxTokens) > 0
     || s.showReasoning === false;
@@ -887,10 +892,10 @@ function positionPop(pop, btn) {
   pop.style.left = Math.round(left) + "px";
 
   // 向上展开：输入区上缘以上能有多高，就用多高
-  var above = r.top - 10;
+  var above = isMobileLayout() ? host.top - (window.visualViewport ? window.visualViewport.offsetTop : 0) - 10 : r.top - 10;
   pop.style.bottom = "calc(100% + 6px)";
   pop.style.top = "auto";
-  pop.style.maxHeight = Math.max(220, Math.round(above)) + "px";
+  pop.style.maxHeight = Math.max(isMobileLayout() ? 44 : 220, Math.round(above)) + "px";
 }
 
 function openPop(id, btn) {
@@ -943,6 +948,7 @@ function bindPopTriggers() {
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
       if (state.pop) { closePop(); return; }
+      if (isMobileLayout() && mobilePanelOpen()) { setMobilePanel("", false); return; }
       if (state.busy) stop();
     }
   });
@@ -1200,11 +1206,112 @@ function bindResizers() {
   });
 }
 
+/* 手机抽屉只影响当前页面，不能把临时开关写成桌面侧栏偏好。 */
+var mobileLayout = window.matchMedia("(max-width: 960px)");
+
+function isMobileLayout() {
+  return mobileLayout.matches;
+}
+
+function mobilePanelOpen() {
+  var app = $("#app");
+  return app.classList.contains("mobile-sessions-open") || app.classList.contains("mobile-settings-open");
+}
+
+function syncPanels() {
+  var app = $("#app");
+  var mobile = isMobileLayout();
+  var sessionsOpen = mobile ? app.classList.contains("mobile-sessions-open") : !app.classList.contains("side-off");
+  var settingsOpen = mobile ? app.classList.contains("mobile-settings-open") : !$("#settingsPanel").hidden && !app.classList.contains("set-off");
+  app.classList.toggle("side-off", !sessionsOpen);
+  app.classList.toggle("set-off", !settingsOpen);
+  [["#sessions", sessionsOpen], ["#settingsPanel", settingsOpen]].forEach(function (entry) {
+    var panel = $(entry[0]);
+    panel.inert = !entry[1];
+    panel.setAttribute("aria-hidden", entry[1] ? "false" : "true");
+  });
+  $(".main").inert = mobile && (sessionsOpen || settingsOpen);
+  var backdrop = $("#mobileBackdrop");
+  if (backdrop) backdrop.hidden = !mobile || !(sessionsOpen || settingsOpen);
+  var dock = $("#dockToggle");
+  dock.setAttribute("aria-controls", "sessions");
+  dock.setAttribute("aria-expanded", sessionsOpen ? "true" : "false");
+  dock.title = sessionsOpen ? "收起对话列表" : "展开对话列表";
+  dock.setAttribute("aria-label", dock.title);
+  var toggle = $("#settingsToggle");
+  toggle.setAttribute("aria-controls", "settingsPanel");
+  toggle.classList.toggle("on", settingsOpen);
+  toggle.setAttribute("aria-expanded", settingsOpen ? "true" : "false");
+  toggle.title = settingsOpen ? "收起设置栏" : "展开设置栏";
+  toggle.setAttribute("aria-label", toggle.title);
+}
+
+function setMobilePanel(panel, open) {
+  var app = $("#app");
+  var focused = document.activeElement;
+  var focusInSessions = $("#sessions").contains(focused);
+  var focusInSettings = $("#settingsPanel").contains(focused);
+  closePop();
+  app.classList.toggle("mobile-sessions-open", open && panel === "sessions");
+  app.classList.toggle("mobile-settings-open", open && panel === "settings");
+  if (open && panel === "settings") $("#settingsPanel").hidden = false;
+  syncPanels();
+  if (open) $(panel === "sessions" ? "#sideToggle" : "#settingsToggle").focus({ preventScroll: true });
+  else if (focusInSessions || focusInSettings) $(focusInSessions ? "#dockToggle" : "#settingsToggle").focus({ preventScroll: true });
+}
+
+function bindResponsiveLayout() {
+  var backdrop = el("button", { id: "mobileBackdrop", class: "mobile-backdrop", type: "button", "aria-label": "关闭侧栏", hidden: true });
+  backdrop.addEventListener("click", function () { setMobilePanel("", false); });
+  $("#app").appendChild(backdrop);
+  var viewportMeta = $('meta[name="viewport"]');
+  if (viewportMeta) viewportMeta.content = "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content";
+
+  function syncViewport() {
+    var root = document.documentElement;
+    $("#input").placeholder = isMobileLayout() ? "发送消息，可添加图片或文件…" : "给模型说点什么…（可拖入图片或文件、粘贴图片）";
+    if (isMobileLayout()) {
+      // 软键盘缩小的是可见视口；输入区跟随它，避免被键盘或浏览器工具栏挡住。
+      var viewport = window.visualViewport;
+      root.style.setProperty("--app-height", Math.round(viewport ? viewport.height : window.innerHeight) + "px");
+      root.style.setProperty("--viewport-top", Math.round(viewport ? viewport.offsetTop : 0) + "px");
+    } else {
+      root.style.removeProperty("--app-height");
+      root.style.removeProperty("--viewport-top");
+    }
+    if (state.pop) {
+      var trigger = $('[data-pop="' + state.pop + '"]');
+      if (trigger) positionPop($("#" + state.pop), trigger);
+    }
+    if (state.follow) scrollBottom();
+  }
+
+  mobileLayout.addEventListener("change", function () {
+    setMobilePanel("", false);
+    $("#app").classList.toggle("side-off", state.settings.sidebar === false);
+    toggleSettings(isMobileLayout() ? false : state.settings.settingsOpen === true, false);
+    syncViewport();
+  });
+  window.addEventListener("resize", syncViewport);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", syncViewport);
+    window.visualViewport.addEventListener("scroll", syncViewport);
+  }
+  syncPanels();
+  syncViewport();
+}
+
 /* 设置：右侧独立边栏，开着就显示，状态记在设置里 */
 // 右侧设置栏：settingsOpen 表示「它开着」，收起只是视觉上收成 0 宽，
 // 和左侧栏一样带过渡，收起后只在右上角留一个浮动按钮。
 function toggleSettings(open, persist) {
   var app = $("#app");
+  if (isMobileLayout()) {
+    var mobileShow = typeof open === "boolean" ? open : !app.classList.contains("mobile-settings-open");
+    setMobilePanel("settings", mobileShow);
+    if (mobileShow) renderSettings();
+    return;
+  }
   // 当前是不是「真的开着」：面板显示着，且没有处于收起态。
   // 只看 class 会把「从没开过」（panel.hidden 为 true、没有 set-off）
   // 误判成开着的，于是点了去关，被下面的守卫直接 return，按钮就失灵了。
@@ -1222,6 +1329,7 @@ function toggleSettings(open, persist) {
   if (persist !== false) {
     api("api/settings", { method: "POST", body: { settingsOpen: show } }).catch(function () {});
   }
+  syncPanels();
   if (show) renderSettings();
 }
 
@@ -1246,6 +1354,94 @@ function renderSettings() {
   renderSetList("#mcpList", state.library.mcp || [], "mcp", function (item) {
     return { key: item.name, name: item.name, extra: item.transport || "" };
   });
+  renderImageSettings();
+}
+
+function renderImageSettings() {
+  var image = state.settings.imageGeneration || { enabled: false, server: "", tool: "generate_image", model: "", models: [] };
+  $("#imageEnabled").setAttribute("aria-checked", image.enabled ? "true" : "false");
+  var servers = $("#imageServer");
+  servers.replaceChildren(el("option", { value: "", text: "选择服务器" }));
+  var names = (state.library.mcp || []).map(function (item) { return item.name; });
+  if (image.server && names.indexOf(image.server) < 0) names.push(image.server);
+  names.forEach(function (name) { servers.appendChild(el("option", { value: name, text: name })); });
+  servers.value = image.server;
+  $("#imageTool").value = image.tool;
+  $("#imageModel").value = image.model;
+  $("#imageAliases").value = (image.models || []).map(function (item) { return item.alias + " = " + item.model; }).join(String.fromCharCode(10));
+  renderImageOptions();
+}
+
+function renderImageOptions() {
+  var image = state.settings.imageGeneration || {};
+  var tools = state.imageTools.filter(function (tool) { return tool.server === image.server; });
+  $("#imageToolOptions").replaceChildren();
+  tools.forEach(function (tool) { $("#imageToolOptions").appendChild(el("option", { value: tool.name })); });
+  var selected = tools.find(function (tool) { return tool.name === image.tool; });
+  var values = selected && selected.inputSchema && selected.inputSchema.properties && selected.inputSchema.properties.model;
+  var models = values && Array.isArray(values.enum) ? values.enum.slice() : [];
+  (image.models || []).forEach(function (item) {
+    models = models.map(function (model) { return model === item.model ? item.alias : model; });
+    if (models.indexOf(item.alias) < 0) models.push(item.alias);
+  });
+  $("#imageModelOptions").replaceChildren();
+  Array.from(new Set(models)).forEach(function (model) { $("#imageModelOptions").appendChild(el("option", { value: model })); });
+}
+
+function patchImageSettings(patch) {
+  patchSettings({ imageGeneration: Object.assign({}, state.settings.imageGeneration, patch) });
+  renderImageOptions();
+}
+
+function saveImageAliases() {
+  var input = $("#imageAliases");
+  var models = [];
+  var aliases = new Set();
+  var valid = input.value.split(String.fromCharCode(10)).every(function (line) {
+    if (!line.trim()) return true;
+    var separator = line.indexOf("=");
+    var alias = line.slice(0, separator).trim();
+    var model = line.slice(separator + 1).trim();
+    if (separator < 1 || !alias || !model || alias === model || aliases.has(alias)) return false;
+    aliases.add(alias);
+    models.push({ alias: alias, model: model });
+    return true;
+  });
+  valid = valid && models.every(function (item) {
+    return models.every(function (other) { return item.alias.indexOf(other.model) < 0; });
+  });
+  input.setAttribute("aria-invalid", valid ? "false" : "true");
+  input.setCustomValidity(valid ? "" : "每行填写：唯一别名 = 真实模型，别名不能包含任何真实模型标识");
+  if (!valid) { input.reportValidity(); return false; }
+  patchImageSettings({ models: models });
+  return true;
+}
+
+function loadImageModels() {
+  var status = $("#imageStatus");
+  var image = state.settings.imageGeneration || {};
+  if (!image.enabled || !image.server) {
+    status.textContent = "请先启用生图并选择服务器";
+    return;
+  }
+  if (!saveImageAliases()) return;
+  status.className = "set-tools-status";
+  status.textContent = "加载中…";
+  $("#loadImageModels").disabled = true;
+  // 先落盘再检查，避免刚切换服务器时读到防抖保存之前的旧配置。
+  flushSettings(true).then(function () { return api("api/mcp/tools"); }).then(function (data) {
+    var server = (data.servers || []).find(function (item) { return item.name === image.server; });
+    if (!server || !server.ok) throw new Error(server && server.error || "服务器不可用");
+    state.imageTools = (server.tools || []).map(function (tool) { return Object.assign({}, tool, { server: server.name }); });
+    renderImageOptions();
+    var tool = state.imageTools.find(function (item) { return item.name === image.tool; });
+    if (!tool) throw new Error("找不到指定生图工具，请从候选项选择");
+    status.textContent = $("#imageModelOptions").children.length + " 个模型选项 · 可手填";
+    status.className = "set-tools-status ok";
+  }).catch(function (err) {
+    status.textContent = "加载失败：" + err.message;
+    status.className = "set-tools-status err";
+  }).then(function () { $("#loadImageModels").disabled = false; });
 }
 
 function renderSetList(sel, items, field, pick) {
@@ -1462,7 +1658,9 @@ function askDelete(id, title) {
 
 /* 侧栏收起 / 展开，状态存在设置里，下次打开还是那样 */
 function setSidebar(open) {
+  if (isMobileLayout()) { setMobilePanel("sessions", open); return; }
   $("#app").classList.toggle("side-off", !open);
+  syncPanels();
   state.settings.sidebar = open;
   api("api/settings", { method: "POST", body: { sidebar: open } }).catch(function () {});
 }
@@ -1478,6 +1676,7 @@ function openConversation(id) {
     renderMessages();
     renderSessions();
     scrollBottom(true);
+    if (isMobileLayout()) setSidebar(false);
   }).catch(function (err) {
     toast("打开对话失败：" + err.message, true);
   });
@@ -1493,6 +1692,7 @@ function normalizeMessage(m) {
         id: c.id || "", name: c.name || "",
         args: c.args === undefined ? "" : c.args,
         result: c.result === undefined ? "" : c.result,
+        artifacts: Array.isArray(c.artifacts) ? c.artifacts.slice() : [],
         isError: Boolean(c.isError)
       };
     }) : [],
@@ -1518,7 +1718,10 @@ function persistConversation() {
         content: m.content || "",
         reasoning: m.reasoning || "",
         toolCalls: (m.toolCalls || []).map(function (c) {
-          return { id: c.id, name: c.name, args: c.args, result: c.result, isError: Boolean(c.isError) };
+          return { id: c.id, name: c.name, args: c.args, result: c.result, isError: Boolean(c.isError), artifacts: (c.artifacts || []).map(function (item) {
+            // 本地文件按路径恢复，避免把多份大图重复写入对话 JSON。
+            return item.path ? { name: item.name, kind: item.kind, mimeType: item.mimeType, size: item.size, path: item.path } : item;
+          }) };
         }),
         files: (m.files || []).length ? m.files : undefined,
         usage: m.usage || undefined,
@@ -1797,6 +2000,77 @@ function lightbox(src, name) {
   document.body.appendChild(box);
 }
 
+function renderArtifacts(container, calls) {
+  container.replaceChildren();
+  var items = [];
+  var seen = new Set();
+  (calls || []).forEach(function (call) {
+    (call.artifacts || []).forEach(function (item) {
+      var key = item.path || item.data || item.name;
+      if (seen.has(key)) return;
+      seen.add(key);
+      items.push(item);
+    });
+  });
+  container.hidden = !items.length;
+  if (!items.length) return;
+  container.appendChild(el("div", { class: "artifact-heading", text: "本次产物 · " + items.length }));
+  items.forEach(function (item) {
+    var card = el("div", { class: "artifact-card" });
+    var title = el("div", { class: "artifact-title" }, el("span", { text: item.name || "生成文件" }), el("span", { class: "artifact-size", text: fmtBytes(item.size) }));
+    card.appendChild(title);
+    var src = item.kind === "image" ? safeImgSrc(item.data) : "";
+    if (src) {
+      var image = el("img", { class: "artifact-image", src: src, alt: item.name || "生成图片", loading: "lazy" });
+      var button = el("button", { class: "artifact-image-open", type: "button", "aria-label": "放大预览：" + item.name }, image);
+      button.addEventListener("click", function () { lightbox(src, item.name); });
+      card.appendChild(button);
+    } else if ((item.kind === "text" || item.kind === "html") && typeof item.text === "string") {
+      var details = el("details", { class: "artifact-text" }, el("summary", { text: item.kind === "html" ? "预览页面（脚本与联网已禁用）" : "展开内容" }));
+      if (item.kind === "html") {
+        // 产物 HTML 只能在独立沙箱中显示，禁止脚本、表单、联网和父页面访问。
+        var frame = el("iframe", { sandbox: "", referrerpolicy: "no-referrer", title: item.name || "HTML 产物预览" });
+        var template = document.createElement("template");
+        template.innerHTML = item.text;
+        var doc = template.content;
+        doc.querySelectorAll("script, meta, base, link, iframe, frame, object, embed, form, template, noscript").forEach(function (node) { node.remove(); });
+        doc.querySelectorAll("*").forEach(function (node) {
+          Array.from(node.attributes).forEach(function (attribute) {
+            if (/^on|(?:href|action|srcdoc|target|srcset|ping|background)$/i.test(attribute.name)) node.removeAttribute(attribute.name);
+            if (attribute.name.toLowerCase() === "src" && !safeImgSrc(attribute.value)) node.removeAttribute(attribute.name);
+          });
+        });
+        frame.srcdoc = '<meta http-equiv="Content-Security-Policy" content="default-src ' + "'none'" + '; style-src ' + "'unsafe-inline'" + '; img-src data:; font-src data:; form-action ' + "'none'" + '; base-uri ' + "'none'" + '">' + template.innerHTML;
+        details.appendChild(frame);
+      } else details.appendChild(el("pre", { text: item.text }));
+      card.appendChild(details);
+    } else {
+      card.appendChild(el("div", { class: "artifact-help", text: item.kind === "pdf" ? "PDF 文件 · 点击预览" : "文件已生成 · 可按需保存后打开" }));
+    }
+    if (typeof item.data === "string" && item.data.indexOf("data:" + item.mimeType + ";base64,") === 0 && item.kind !== "html") {
+      var save = el("button", { class: "text", type: "button", text: item.kind === "pdf" ? "预览 PDF" : "保存副本" });
+      save.addEventListener("click", function () {
+        var payload = item.data.slice(item.data.indexOf(",") + 1);
+        var bytes = Uint8Array.from(atob(payload), function (value) { return value.charCodeAt(0); });
+        var url = URL.createObjectURL(new Blob([bytes], { type: item.mimeType }));
+        if (item.kind === "pdf") {
+          var viewer = el("div", { class: "artifact-viewer", role: "dialog", "aria-modal": "true", "aria-label": item.name }, el("button", { class: "text artifact-close", type: "button", text: "关闭预览" }), el("iframe", { src: url, sandbox: "", referrerpolicy: "no-referrer", title: item.name }));
+          viewer.querySelector("button").addEventListener("click", function () { viewer.remove(); URL.revokeObjectURL(url); });
+          document.body.appendChild(viewer);
+        } else {
+          var link = el("a", { href: url, download: item.name || "artifact" });
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+        }
+      });
+      card.appendChild(save);
+    }
+    container.appendChild(card);
+  });
+}
+
 function buildTurn(msg, animate) {
   var root = el("div", { class: "turn " + msg.role + (animate ? " enter" : "") });
   var name = turnLabelFor(msg);
@@ -1855,6 +2129,9 @@ function buildTurn(msg, animate) {
   var bodyMd = el("div", { class: "turn-body md" });
   renderMarkdown(bodyMd, msg.content || "");
   root.appendChild(bodyMd);
+  var artifacts = el("section", { class: "reply-artifacts", "aria-label": "生成产物" });
+  renderArtifacts(artifacts, msg.toolCalls);
+  root.appendChild(artifacts);
 
   var err = el("div", { class: "turn-error", hidden: true });
   if (msg.error) { err.textContent = msg.error; err.hidden = false; }
@@ -1873,7 +2150,7 @@ function buildTurn(msg, animate) {
   var refs = {
     root: root, msg: msg, label: label, meta: meta, think: think,
     thinkBody: think.querySelector(".think-body"), talks: talks, cards: cards,
-    body: bodyMd, err: err, actions: actions, copy: copy, forage: forage, dirty: false
+    body: bodyMd, artifacts: artifacts, err: err, actions: actions, copy: copy, forage: forage, dirty: false
   };
   // 觅食状态不在 buildTurn 里画：历史上每一轮都挂一条太吵。
   // 只在 renderMessages 末尾给最新一轮补上（见 showLatestForage）。
@@ -2116,6 +2393,7 @@ function send() {
   var text = input.value.trim();
   if (!text && !(state.attachments || []).length) return;
   if (!state.settings.model) { toast("先选一个模型", true); return; }
+  if (!saveImageAliases()) return;
 
   var files = (state.attachments || []).map(function (f) {
     return { name: f.name, type: f.type, kind: f.kind, size: f.size, data: f.data };
@@ -2170,6 +2448,7 @@ function send() {
     // assistant.tool_calls 和对应的 tool 结果一起重放，缺结果的调用它自己丢掉。
     var calls = m.role === "assistant" && Array.isArray(m.toolCalls)
       ? m.toolCalls.filter(function (c) { return c && c.name && (c.result || c.isError); })
+        .map(function (call) { return { id: call.id, name: call.name, args: call.args, result: call.result, isError: call.isError }; })
       : [];
     return {
       role: m.role,
@@ -2188,13 +2467,18 @@ function send() {
     system: state.settings.systemEnabled === false ? "" : (state.settings.system || ""),
     temperature: Number(state.settings.temperature),
     maxTokens: Number(state.settings.maxTokens) || 0,
-    useTools: (state.settings.mcp || []).length > 0,
+    useTools: (state.settings.mcp || []).length > 0 || Boolean(state.settings.imageGeneration && state.settings.imageGeneration.enabled),
     clientId: state.clientId
   };
   var started = Date.now();
   forageBegin(refs); // 开始计时：从按下发送到这一轮结束，显示在这条回复的底部
 
-  streamChat(payload, function (evt) { handleEvent(evt, refs); }, state.abort.signal)
+  // 生图偏好只信任服务端保存的设置；发送前必须等待落盘，避免用旧模型出图。
+  var requestSignal = state.abort.signal;
+  flushSettings(true).then(function () {
+    if (requestSignal.aborted) throw new DOMException("请求已停止", "AbortError");
+    return streamChat(payload, function (evt) { handleEvent(evt, refs); }, requestSignal);
+  })
     .then(function () {
       if (!asstMsg.ms) asstMsg.ms = Date.now() - started;
       finish(refs);
@@ -2304,6 +2588,7 @@ function handleTool(evt, refs) {
     if (!target) target = msg.toolCalls[msg.toolCalls.length - 1];
     if (!target) return;
     target.result = evt.result === undefined || evt.result === null ? "" : evt.result;
+    target.artifacts = Array.isArray(evt.artifacts) ? evt.artifacts : [];
     target.isError = Boolean(evt.isError);
     var hit = refs.cards[target.id];
     if (!hit) {
@@ -2311,6 +2596,7 @@ function handleTool(evt, refs) {
       hit = refs.cards[keys[keys.length - 1]];
     }
     if (hit) hit.done();
+    if (refs.artifacts) renderArtifacts(refs.artifacts, msg.toolCalls);
     scrollBottom(false);
   }
 }
@@ -2441,6 +2727,7 @@ function isBlankDraft() {
 
 function newChat() {
   if (state.busy) { toast("正在生成，先停止再新建对话", true); return; }
+  if (isMobileLayout()) setSidebar(false);
   // 已经在一个空白的新对话里了：再点"新对话"就保持原样，别叠出第二个
   if (isBlankDraft()) { $("#input").focus(); return; }
   state.draft = { id: DRAFT_ID, title: "新对话", updated: Date.now() };
@@ -2479,9 +2766,12 @@ function bindUI() {
   $("#send").addEventListener("click", function () { if (state.busy) stop(); else send(); });
   $("#newSession").addEventListener("click", newChat);
   $("#sideToggle").addEventListener("click", function () {
-    setSidebar($("#app").classList.contains("side-off"));
+    setSidebar(isMobileLayout() ? !$("#app").classList.contains("mobile-sessions-open") : $("#app").classList.contains("side-off"));
   });
-  $("#dockToggle").addEventListener("click", function () { setSidebar(true); });
+  $("#dockToggle").addEventListener("click", function () {
+    setSidebar(isMobileLayout() ? !$("#app").classList.contains("mobile-sessions-open") : true);
+  });
+  bindResponsiveLayout();
   bindAttachments();
   bindResizers();
 
@@ -2509,6 +2799,25 @@ function bindUI() {
   $("#systemInput").addEventListener("input", function (e) {
     patchSettings({ system: e.target.value });
   });
+
+  $("#imageEnabled").addEventListener("click", function (event) {
+    var enabled = event.currentTarget.getAttribute("aria-checked") !== "true";
+    event.currentTarget.setAttribute("aria-checked", enabled ? "true" : "false");
+    patchImageSettings({ enabled: enabled });
+  });
+  $("#imageServer").addEventListener("change", function (event) {
+    state.imageTools = [];
+    $("#imageStatus").textContent = "";
+    patchImageSettings({ server: event.target.value });
+  });
+  $("#imageTool").addEventListener("change", function (event) {
+    patchImageSettings({ tool: event.target.value.trim() || "generate_image" });
+  });
+  $("#imageModel").addEventListener("change", function (event) {
+    patchImageSettings({ model: event.target.value.trim() });
+  });
+  $("#imageAliases").addEventListener("change", saveImageAliases);
+  $("#loadImageModels").addEventListener("click", loadImageModels);
 
   $("#temperature").addEventListener("input", function (e) {
     var v = Number(e.target.value);
@@ -2592,8 +2901,9 @@ function bindUI() {
 
 /* ================= 启动 ================= */
 
+var uiBound = false;
 function boot() {
-  bindUI();
+  if (!uiBound) { bindUI(); uiBound = true; }
   autoGrow();
   updateSend();
   renderMessages();
@@ -2607,7 +2917,7 @@ function boot() {
     $("#app").classList.toggle("side-off", state.settings.sidebar === false);
     applyWidths();
     // 设置栏上次开着就还开着
-    toggleSettings(state.settings.settingsOpen === true, false);
+    toggleSettings(isMobileLayout() ? false : state.settings.settingsOpen === true, false);
     renderPills();
     renderSettings();
     $("#version").textContent = "v" + (data.version || "0.1.0");

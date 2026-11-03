@@ -117,6 +117,30 @@
       </div>
 
       <div class="set-sec">
+        <div class="set-title">生图</div>
+        <div class="set-row">
+          <span class="set-label">默认使用 MCP 生图</span>
+          <button class="switch" id="imageEnabled" type="button" role="switch" aria-checked="false" aria-label="默认使用 MCP 生图"><span class="switch-thumb"></span></button>
+        </div>
+        <label class="image-field" for="imageServer">MCP 服务器</label>
+        <select id="imageServer" class="image-control" aria-describedby="imageHelp"></select>
+        <label class="image-field" for="imageTool">生图工具</label>
+        <input id="imageTool" class="image-control" list="imageToolOptions" placeholder="generate_image" autocomplete="off">
+        <datalist id="imageToolOptions"></datalist>
+        <label class="image-field" for="imageModel">固定模型 / 本地别名</label>
+        <input id="imageModel" class="image-control" list="imageModelOptions" placeholder="留空沿用 magpie 默认模型" autocomplete="off">
+        <datalist id="imageModelOptions"></datalist>
+        <label class="image-field" for="imageAliases">私有模型别名（每行：别名 = 真实模型）</label>
+        <textarea id="imageAliases" class="ta" rows="3" spellcheck="false" placeholder="可留空，仅在需要隐藏真实模型名时配置" aria-describedby="imagePrivacy"></textarea>
+        <p class="image-help" id="imageHelp">启用后自动连接所选服务器，无需重复勾选。明确的生图请求优先调用该工具；固定模型由后端传入。</p>
+        <p class="image-help" id="imagePrivacy">真实模型映射仅保存在本机，发给聊天模型的标识替换为别名；生图服务仍会收到真实模型。此配置不授予额外权限。</p>
+        <div class="set-tools">
+          <button class="text" id="loadImageModels" type="button">加载工具与模型</button>
+          <span class="set-tools-status" id="imageStatus" role="status"></span>
+        </div>
+      </div>
+
+      <div class="set-sec">
         <div class="set-title">布局</div>
         <div class="set-row">
           <span class="set-label">会话区宽度</span>

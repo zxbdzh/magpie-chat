@@ -4,6 +4,8 @@ A chat page in [magpie](https://usemagpie.ai)'s window. Talk to magpie's own mod
 
 Made by **Magic_zero** ([Magiczerowxy](https://github.com/Magiczerowxy)), from [Magiczerowxy/magpie-chat](https://github.com/Magiczerowxy/magpie-chat) (0.1.21). This package is that code, with the changes listed under [Changes from the original](#changes-from-the-original).
 
+> 自维护分支：[zxbdzh/magpie-chat](https://github.com/zxbdzh/magpie-chat)。在上游基础上增加 MCP 生图偏好与模型别名、回复内产物预览和移动端适配。下方插件市场安装命令对应上游发布包，自维护改动以本仓库源码为准。
+
 ![Chat inside magpie's window](https://raw.githubusercontent.com/Magiczerowxy/magpie-chat/main/screenshots/23-math-and-layout.png)
 
 ## Install
@@ -59,6 +61,36 @@ Only the chat page it served:
 ```
 
 The launcher and the service both read it. Change it if something else holds 3477.
+
+## 移动端
+
+宽度不超过 960px 时，会话列表和设置改为覆盖式抽屉，支持点击遮罩或按 Escape 收起；切换会话、新建对话后自动关闭会话抽屉。触控按钮、输入字号、图片与场景预览适配窄屏，并通过可见视口及安全区处理软键盘、横屏和底部留白。手机端开关抽屉不会覆盖桌面的侧栏偏好。
+
+## 生图偏好
+
+在 Chat 的设置栏找到「生图」：
+
+1. 打开「默认使用 MCP 生图」，选择已配置的 MCP 服务器，工具名默认是 `generate_image`。所选服务器会自动用于 Chat，无需在 MCP 列表重复勾选。
+2. 点击「加载工具与模型」，从 MCP 的完整模型枚举中选择，或者直接填写服务支持的 `provider/model`。这里只读取工具定义，不生成图片。
+3. 「固定模型 / 本地别名」留空时，调用不带 `model` 参数，沿用 magpie／MCP 服务的默认生图模型；填写后由后端固定传入，不接受聊天模型自行改选。
+4. 如需隐藏私有模型标识，在「私有模型别名」中每行填写 `别名 = 真实模型`，再把固定模型设为该别名。映射保存在本机 Chat 设置中，工具定义、历史消息及工具结果发送给聊天模型前会替换为别名；本机工具记录仍展示实际参数。生图 MCP／供应商仍会收到真实模型标识，这不是凭据存储或权限绕过机制。
+
+启用后，明确的生图请求首轮会指定该生图工具，后续允许调用 `generation_result` 查询异步任务；普通聊天和询问生图能力、模型的问题不强制生图。意图识别是保守的关键词规则，不保证理解所有表达，其他请求仍由聊天模型决定工具调用。工具不可用时明确报错，不静默切换其他生图服务。
+
+生图工具保留完整参数约束，模型枚举不再只提供前 20 项。真实出图取决于 MCP 服务、账号权限、所选模型及聊天网关是否支持指定工具调用。
+
+## 产物预览
+
+工具生成的图片及场景文件会显示在回复下方的「本次产物」卡片中，不再只能复制本地绝对路径：
+
+- 图片：支持 MCP 直接返回的图片，以及工具结果中的工作区图片路径，点击可放大。
+- HTML：显示隔离的静态页面预览，禁用脚本、外部网络、表单及跳转；交互网页暂不执行。
+- 文本、Markdown、JSON、CSV、代码：可展开查看原文。PDF：提供按需预览；部分嵌入式浏览器可能不支持 PDF 查看器。
+- Word、Excel、PowerPoint、ZIP：显示文件卡片并提供手动保存，不包含 Office 排版渲染。不会自动下载文件。
+
+只读取 Chat 工作区内、工具明确返回且实际存在的文件，拒绝路径越界、符号链接越界及网络文件路径；每次工具结果最多 6 个产物，总预览体积不超过 8 MiB。远程 URL 不自动抓取，现有外链仍由用户主动打开。预览二进制仅交给界面，不进入发给聊天模型的工具历史。重新打开旧会话时，可从仍存在的工作区文件恢复预览。
+
+这不是公网分享功能：不会创建隧道、上传文件或开放 Chat。其他人需要已有的授权访问入口才能查看，预览卡片本身不产生公开链接。
 
 ## Starting it without magpie's host
 

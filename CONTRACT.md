@@ -41,7 +41,9 @@
 
 ### GET/POST /api/settings
 
-字段同 `bootstrap.settings`：`model`（string）、`effort`（string，空串表示不发）、`system`（string）、`instructions`（string[]，library 里的 id）、`skills`（string[]，技能名）、`mcp`（string[]，服务器名，空数组=不用工具）、`temperature`（number）、`maxTokens`（number，0=不限）。POST body 只需带要改的字段，返回完整 settings。
+字段同 `bootstrap.settings`：`model`（string）、`effort`（string，空串表示不发）、`system`（string）、`instructions`（string[]，library 里的 id）、`skills`（string[]，技能名）、`mcp`（string[]，服务器名）、`temperature`（number）、`maxTokens`（number，0=不限）。POST body 只需带要改的字段，返回完整 settings。
+
+`imageGeneration` 为可选的生图偏好对象：`{ enabled: false, server: "", tool: "generate_image", model: "", models: [] }`。`models` 存放 `{ alias, model }` 本地映射；别名必须唯一，且不能包含任一真实模型标识，非法映射 POST 返回 400，不覆盖原设置。启用后 `server` 自动加入本轮 MCP 列表；`mcp` 为空且未启用生图才表示不用工具。固定 `model` 可以填写真实模型或别名，空串表示删掉调用中的 `model` 参数，交给 MCP 默认配置。真实标识在发送给聊天模型的工具定义、消息和工具结果中替换为别名，本机 SSE 工具记录保留实际调用参数。
 
 ### GET /api/library
 
@@ -49,7 +51,7 @@
 
 ### GET /api/mcp/tools
 
-`{ servers: [{ name, ok, error, tools: [{ name, description, server }] }] }`，只列 settings.mcp 里启用的服务；失败不影响其它服务。
+`{ servers: [{ name, ok, error, tools: [{ name, description, server, inputSchema }] }] }`，列出 settings.mcp 及已启用的 imageGeneration.server；失败不影响其它服务。完整 `inputSchema` 用于本地生图设置加载工具与模型列表，不能调用生图。
 
 ### POST /api/mcp/call（调试用，可选）
 
@@ -63,6 +65,10 @@
 POST 是 upsert（带 id 就覆盖），返回保存后的对象。GET 列表返回 `{ items: [{id,title,updated,preview}] }`；为兼容，列表项不返回 messages。
 
 ### POST /api/chat  （SSE）
+
+工具完成的 `tool` 事件可附带 `artifacts`：`[{ name, kind, mimeType, size, path?, data?, text? }]`，`kind` 为 `image | html | text | pdf | file`。`path` 是工作区相对路径；二进制预览用 data URL，文本用 `text`。前端在独立产物卡片中渲染，不把预览数据转发为模型工具历史，也不会自动下载。HTML 仅在无脚本、无联网的独立沙箱中展示。每个结果最多 6 项、合计 8 MiB，工作区外或不存在的文件不提供预览。
+
+读取会话时可按工具结果或已存的产物相对路径恢复预览，仅丰富响应、不改写历史文件；本地文件预览数据在前端保存时只保留元数据及相对路径。
 
 请求：
 

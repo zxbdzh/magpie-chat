@@ -3,7 +3,7 @@
 // served: a request needs the per-process token from that page's HTML and
 // this service's own Host. Everything here runs against a fake gateway on a
 // free port, with a temporary config folder; nothing reaches the network.
-import { afterAll, beforeAll, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
 import { tmpdir } from "node:os"
@@ -20,6 +20,7 @@ delete process.env.MAGPIE_GATEWAY_KEY
 delete process.env.MAGPIE_ADDR
 
 const seen = []
+let imageReply = false
 const gateway = Bun.serve({
   port: 0,
   hostname: "127.0.0.1",
@@ -27,8 +28,17 @@ const gateway = Bun.serve({
     const url = new URL(req.url)
     if (url.pathname === "/v1/models") return Response.json({ data: [{ id: "fake/model", owned_by: "fake" }] })
     if (url.pathname === "/v1/chat/completions") {
-      seen.push({ auth: req.headers.get("authorization"), body: await req.json() })
+      const payload = await req.json()
+      seen.push({ auth: req.headers.get("authorization"), body: payload })
       const chunk = (o) => `data: ${JSON.stringify(o)}\n\n`
+      if (imageReply && !payload.messages.some(message => message.role === "tool")) {
+        const calls = [{ index: 0, id: "image-call", type: "function", function: { name: "images_generate_image", arguments: JSON.stringify({ prompt: "a kitten", model: "provider/wrong" }) } }]
+        if (imageReply === "multiple") calls.push({ index: 1, id: "list-call", type: "function", function: { name: "images_list_models", arguments: "{}" } })
+        return new Response(chunk({ choices: [{ delta: { tool_calls: calls }, finish_reason: "tool_calls" }] }) + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } })
+      }
+      if (imageReply === "async" && payload.messages.filter(message => message.role === "tool").length === 1) {
+        return new Response(chunk({ choices: [{ delta: { tool_calls: [{ index: 0, id: "poll-call", type: "function", function: { name: "images_generation_result", arguments: JSON.stringify({ id: "fake-task" }) } }] }, finish_reason: "tool_calls" }] }) + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } })
+      }
       const body = chunk({ choices: [{ delta: { content: "hel" } }] })
         + chunk({ choices: [{ delta: { content: "lo" }, finish_reason: "stop" }] })
         + "data: [DONE]\n\n"
@@ -70,6 +80,336 @@ function raw(method, path, headers = {}, body) {
 
 const chatBody = { model: "fake/model", messages: [{ role: "user", content: "hi" }] }
 const json = { "content-type": "application/json" }
+
+// 仅在 HTTP 边界模拟外部服务，不替换插件内部模块，也不接触真实生图账号。
+const imageCalls = []
+let extendedImageSchema = false
+let artifactResult = null
+const imageModels = Array.from({ length: 37 }, (_, index) => `provider/image-${index}`)
+const imageMcp = Bun.serve({
+  hostname: "127.0.0.1", port: 0,
+  async fetch(req) {
+    const message = await req.json()
+    if (message.method === "notifications/initialized") return new Response(null, { status: 202 })
+    let result = {}
+    if (message.method === "initialize") result = { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "fake-images", version: "1" } }
+    if (message.method === "tools/list") result = { tools: [
+      { name: "generate_image", description: "Generate an image from a text prompt.", inputSchema: { type: "object", properties: {
+        ...(extendedImageSchema ? Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`option_${index}`, { type: "string" }])) : {}),
+        prompt: { type: "string" }, model: { type: "string", enum: imageModels },
+      }, required: ["prompt"] } },
+      { name: "generation_result", description: "Wait for an image generation task.", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
+      { name: "list_models", description: "List models.", inputSchema: { type: "object", properties: {} } },
+    ] }
+    if (message.method === "tools/call") {
+      imageCalls.push(message.params)
+      result = { content: [{ type: "text", text: JSON.stringify({ model: message.params.arguments.model || "provider/default", url: "https://images.invalid/test.png" }) }] }
+      if (imageReply === "async" && message.params.name === "generate_image") result = { content: [{ type: "text", text: JSON.stringify({ id: "fake-task", status: "pending" }) }] }
+      if (artifactResult) result = artifactResult
+    }
+    return Response.json({ jsonrpc: "2.0", id: message.id, result })
+  },
+})
+writeFileSync(join(cfg, "library.json"), JSON.stringify({ mcp: [{ name: "images", transport: "http", url: `http://127.0.0.1:${imageMcp.port}/mcp` }] }))
+afterAll(() => imageMcp.stop(true))
+
+describe("image generation through the chat API", () => {
+  test("preview extraction bounds file sizes and the number of displayed artifacts", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    const folder = join(cfg, "magpie-chat", "workspace", "artifacts")
+    mkdirSync(folder, { recursive: true })
+    writeFileSync(join(folder, "too-large.txt"), Buffer.alloc(8 * 1024 * 1024 + 1))
+    const names = ["first.txt", "second.txt", "third.txt", "fourth.txt", "fifth.txt", "sixth.txt", "seventh.txt"]
+    for (const name of names) writeFileSync(join(folder, name), "Small artifact")
+    artifactResult = { content: [{ type: "text", text: ["artifacts/too-large.txt", ...names.map(name => "artifacts/" + name)].join("\n") }] }
+    imageReply = true
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      const results = response.body.split("\n\n").filter(Boolean).map(block => JSON.parse(block.split("\n").find(line => line.startsWith("data: ")).slice(6)))
+      expect(results.find(event => event.type === "tool" && event.phase === "result").artifacts.map(item => item.name)).toEqual(["first.txt", "second.txt", "third.txt", "fourth.txt", "fifth.txt", "sixth.txt"])
+    } finally {
+      imageReply = false
+      artifactResult = null
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("preview extraction rejects outside files, network paths and missing outputs", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    const outside = join(cfg, "private-preview.txt")
+    writeFileSync(outside, "PRIVATE_FILE_NOT_A_GENERATED_ARTIFACT")
+    artifactResult = { content: [{ type: "text", text: [outside, "../private-preview.txt", "//server/share/private.txt", "https://example.invalid/private.png", "generated-images/missing.png"].join("\n") }] }
+    imageReply = true
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      const results = response.body.split("\n\n").filter(Boolean).map(block => JSON.parse(block.split("\n").find(line => line.startsWith("data: ")).slice(6)))
+      expect(results.find(event => event.type === "tool" && event.phase === "result").artifacts).toEqual([])
+      expect(response.body).not.toContain("PRIVATE_FILE_NOT_A_GENERATED_ARTIFACT")
+    } finally {
+      imageReply = false
+      artifactResult = null
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("structured tool results expose preview files in arbitrary workspace subfolders", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    const folder = join(cfg, "magpie-chat", "workspace", "output")
+    mkdirSync(folder, { recursive: true })
+    writeFileSync(join(folder, "My scene.txt"), "Preview in a folder with spaces")
+    artifactResult = { content: [{ type: "text", text: "File created" }], structuredContent: { files: [{ path: "output/My scene.txt" }] } }
+    imageReply = true
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      const results = response.body.split("\n\n").filter(Boolean).map(block => JSON.parse(block.split("\n").find(line => line.startsWith("data: ")).slice(6)))
+      expect(results.find(event => event.type === "tool" && event.phase === "result").artifacts).toEqual([expect.objectContaining({ kind: "text", name: "My scene.txt", path: "output/My scene.txt", text: "Preview in a folder with spaces" })])
+    } finally {
+      imageReply = false
+      artifactResult = null
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("scene files become typed preview cards without executing HTML or fetching remote URLs", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    const folder = join(cfg, "magpie-chat", "workspace", "artifacts")
+    mkdirSync(folder, { recursive: true })
+    writeFileSync(join(folder, "scene.html"), '<h1>Scene</h1><script>fetch("https://example.invalid/leak")</script>')
+    writeFileSync(join(folder, "notes.md"), "# Scene notes")
+    writeFileSync(join(folder, "report.pdf"), "%PDF-1.4\nfixture")
+    writeFileSync(join(folder, "slides.pptx"), "fake-office-zip")
+    artifactResult = { content: [{ type: "text", text: ["artifacts/scene.html", "artifacts/notes.md", "artifacts/report.pdf", "artifacts/slides.pptx", "https://example.invalid/remote.png"].join("\n") }] }
+    imageReply = true
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      const results = response.body.split("\n\n").filter(Boolean).map(block => JSON.parse(block.split("\n").find(line => line.startsWith("data: ")).slice(6)))
+      expect(results.find(event => event.type === "tool" && event.phase === "result").artifacts).toEqual([
+        expect.objectContaining({ name: "scene.html", kind: "html", text: expect.stringContaining("<h1>Scene</h1>") }),
+        expect.objectContaining({ name: "notes.md", kind: "text", text: "# Scene notes" }),
+        expect.objectContaining({ name: "report.pdf", kind: "pdf", mimeType: "application/pdf" }),
+        expect.objectContaining({ name: "slides.pptx", kind: "file" }),
+      ])
+    } finally {
+      imageReply = false
+      artifactResult = null
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("MCP image content is retained for preview without reaching the chat model", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]).toString("base64")
+    artifactResult = { content: [{ type: "image", data: png, mimeType: "image/png" }] }
+    imageReply = true
+    const before = seen.length
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      const results = response.body.split("\n\n").filter(Boolean).map(block => JSON.parse(block.split("\n").find(line => line.startsWith("data: ")).slice(6)))
+      expect(results.find(event => event.type === "tool" && event.phase === "result").artifacts).toEqual([expect.objectContaining({ kind: "image", mimeType: "image/png", data: `data:image/png;base64,${png}` })])
+      expect(JSON.stringify(seen.slice(before))).not.toContain(png)
+    } finally {
+      imageReply = false
+      artifactResult = null
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("generated workspace images appear as preview artifacts, not just local paths", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    const folder = join(cfg, "magpie-chat", "workspace", "generated-images")
+    mkdirSync(folder, { recursive: true })
+    const imagePath = join(folder, "preview-kitten.png")
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]).toString("base64")
+    writeFileSync(imagePath, Buffer.from(png, "base64"))
+    imageReply = true
+    artifactResult = { content: [{ type: "text", text: `Generated image, saved to:\n- ${imagePath}` }] }
+    const before = seen.length
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      const events = response.body.split("\n\n").filter(Boolean).map(block => JSON.parse(block.split("\n").find(line => line.startsWith("data: ")).slice(6)))
+      const result = events.find(event => event.type === "tool" && event.phase === "result")
+      expect(result.artifacts).toEqual([expect.objectContaining({ name: "preview-kitten.png", kind: "image", mimeType: "image/png", data: `data:image/png;base64,${png}` })])
+      expect(JSON.stringify(seen.slice(before))).not.toContain(png)
+    } finally {
+      artifactResult = null
+      imageReply = false
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("private aliases redact advertised models and previously saved tool history", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "studio", models: [{ alias: "studio", model: "provider/image-36" }] } })
+      await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [
+        { role: "user", content: "请生图" },
+        { role: "assistant", content: "已使用 provider/image-36", toolCalls: [{ id: "previous-image", name: "images_generate_image", args: { prompt: "a kitten", model: "provider/image-36" }, result: JSON.stringify({ model: "provider/image-36" }) }] },
+        { role: "user", content: "刚才使用了什么模型？" },
+      ] })
+      const payload = seen.at(-1).body
+      expect(JSON.stringify(payload)).not.toContain("provider/image-36")
+      expect(payload.tools.find(tool => tool.function.name === "images_generate_image").function.parameters.properties.model.enum).toContain("studio")
+      expect(payload.messages.find(message => message.role === "tool").content).toBe('{"model":"studio"}')
+    } finally {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("async generation polls for its result without forcing another image", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    const before = seen.length
+    imageReply = "async"
+    imageCalls.length = 0
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      expect(imageCalls.map(call => call.name)).toEqual(["generate_image", "generation_result"])
+      expect(seen[before + 1].body.tools.map(tool => tool.function.name)).toContain("images_generation_result")
+      expect(seen[before + 1].body.tool_choice).toBe("auto")
+      expect(response.body).toContain("event: done")
+    } finally {
+      imageReply = false
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("an unavailable configured image tool reports failure before contacting the chat model", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    const before = seen.length
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "missing_tool", model: "", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      expect(response.body).toContain("指定的生图工具不可用")
+      expect(seen.length).toBe(before)
+    } finally {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("image tool schemas retain model and required fields after the eighth property", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    extendedImageSchema = true
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      const schema = seen.at(-1).body.tools.find(tool => tool.function.name === "images_generate_image").function.parameters
+      expect(schema.properties.model.enum).toEqual(imageModels)
+      expect(schema.properties.prompt.type).toBe("string")
+      expect(schema.required).toContain("prompt")
+    } finally {
+      extendedImageSchema = false
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("a reply can execute multiple tools and return every result to the chat model", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    imageReply = "multiple"
+    imageCalls.length = 0
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      expect(response.body).not.toContain("event: error")
+      expect(seen.at(-1).body.messages.filter(message => message.role === "tool").map(message => message.tool_call_id)).toEqual(["image-call", "list-call"])
+    } finally {
+      imageReply = false
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("image questions and refusals do not force a paid generation", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      for (const content of ["生图使用了什么模型？", "不要生图，解释一下画一只猫的提示词", "你能生成图片吗？", "Do not generate an image; explain the options."]) {
+        await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content }] })
+        expect(seen.at(-1).body.tool_choice).toBe("auto")
+      }
+    } finally {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("an empty image model delegates to the MCP default instead of a model guess", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    imageReply = true
+    imageCalls.length = 0
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      expect(imageCalls[0].arguments).toEqual({ prompt: "a kitten" })
+    } finally {
+      imageReply = false
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("private model aliases keep real identifiers out of every chat-model request", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    const before = seen.length
+    imageReply = true
+    imageCalls.length = 0
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "studio", models: [{ alias: "studio", model: "private-provider/private-image-model" }] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "请生图" }] })
+      expect(imageCalls[0].arguments.model).toBe("private-provider/private-image-model")
+      const requests = JSON.stringify(seen.slice(before).map(request => request.body))
+      expect(requests).not.toContain("private-provider/private-image-model")
+      expect(requests).toContain("studio")
+      expect(response.body).toContain('\"model\":\"private-provider/private-image-model\"')
+    } finally {
+      imageReply = false
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("drawing uses the selected server and fixed model without a separate MCP selection", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    const before = seen.length
+    imageReply = true
+    imageCalls.length = 0
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "provider/image-36", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "帮我生成一只小猫咪" }] })
+      expect(imageCalls[0]).toEqual({ name: "generate_image", arguments: { prompt: "a kitten", model: "provider/image-36" } })
+      expect(seen[before].body.tool_choice).toEqual({ type: "function", function: { name: "images_generate_image" } })
+      expect(response.body).toContain('\"model\":\"provider/image-36\"')
+    } finally {
+      imageReply = false
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("all image model options reach the chat model", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: ["images"], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "images generate_image" }] })
+      const tool = seen.at(-1).body.tools.find(tool => tool.function.name === "images_generate_image")
+      expect(tool.function.parameters.properties.model.enum).toEqual(imageModels)
+    } finally {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+
+  test("a Chinese drawing request receives the configured image tool", async () => {
+    const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+    try {
+      await raw("POST", "/api/settings", headers, { mcp: ["images"], imageGeneration: { enabled: true, server: "images", tool: "generate_image", model: "", models: [] } })
+      const response = await raw("POST", "/api/chat", headers, { model: "fake/model", messages: [{ role: "user", content: "帮我生成一只小猫咪" }] })
+      expect(response.body).toContain('event: done')
+      expect(seen.at(-1).body.tools.map(tool => tool.function.name)).toContain("images_generate_image")
+    } finally {
+      await raw("POST", "/api/settings", headers, { mcp: [], imageGeneration: { enabled: false } })
+    }
+  })
+})
 
 test("the page's HTML carries the token and no CORS header", async () => {
   const res = await raw("GET", "/", { origin: "null" })
@@ -274,6 +614,35 @@ test("settings keep syncWidth and clamp composerWidth to 35", async () => {
   const back = JSON.parse((await raw("GET", "/api/settings", h)).body)
   expect(back.syncWidth).toBe(true)
   expect(back.composerWidth).toBe(35)
+})
+
+test("image generation preferences survive saving and reading settings", async () => {
+  const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+  const imageGeneration = {
+    enabled: true, server: "images", tool: "generate_image", model: "studio",
+    models: [{ alias: "studio", model: "private-provider/private-image-model" }],
+  }
+  try {
+    const saved = await raw("POST", "/api/settings", headers, { imageGeneration })
+    expect(saved.status).toBe(200)
+    const read = await raw("GET", "/api/settings", headers)
+    expect(JSON.parse(read.body).imageGeneration).toEqual(imageGeneration)
+  } finally {
+    await raw("POST", "/api/settings", headers, { imageGeneration: { enabled: false } })
+  }
+})
+
+test("invalid private aliases are rejected without overwriting saved image preferences", async () => {
+  const headers = { ...json, origin: "null", "x-magpie-chat-token": token }
+  const imageGeneration = { enabled: true, server: "images", tool: "generate_image", model: "studio", models: [{ alias: "studio", model: "provider/private" }] }
+  try {
+    await raw("POST", "/api/settings", headers, { imageGeneration })
+    const invalid = await raw("POST", "/api/settings", headers, { imageGeneration: { ...imageGeneration, models: [{ alias: "studio", model: "provider/a" }, { alias: "studio", model: "provider/b" }] } })
+    expect(invalid.status).toBe(400)
+    expect(JSON.parse((await raw("GET", "/api/settings", headers)).body).imageGeneration).toEqual(imageGeneration)
+  } finally {
+    await raw("POST", "/api/settings", headers, { imageGeneration: { enabled: false } })
+  }
 })
 
 test("an empty configDir reads the library from the real config folder", async () => {

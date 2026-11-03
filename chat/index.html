@@ -34,7 +34,7 @@
     <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8.4 3v10" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M6.6 6.6L8.2 8l-1.6 1.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
 
-  <main class="main" id="chatMain">
+  <main class="main">
     <!-- 会话区：滚动容器 + 浮层滚动条（和 magpie 自己的做法一致） -->
     <div class="stream-wrap" id="streamWrap">
       <div class="stream" id="stream"></div>
@@ -185,26 +185,6 @@
   <button class="pill icon settings-toggle" id="settingsToggle" type="button" title="展开设置栏" aria-label="展开设置栏" aria-expanded="false">
     <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7.6 3v10" fill="none" stroke="currentColor" stroke-width="1.3"/><path class="ico-in" d="M10.2 6.6L8.6 8l1.6 1.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path class="ico-out" d="M9.4 6.6L11 8l-1.6 1.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
-
-  <!-- 宿主没有暴露原生窗口尺寸 API；小窗因此是页面内可拖动、可缩放的画中画。 -->
-  <button class="pill icon mini-toggle" id="miniToggle" type="button" title="打开小窗（Ctrl+Shift+M）" aria-label="打开小窗" aria-expanded="false" aria-controls="miniWindow">
-    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="7.2" y="7" width="5" height="4" rx=".8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
-  </button>
-
-  <div class="mini-window" id="miniWindow" role="dialog" aria-label="Chat 小窗" aria-modal="false" hidden>
-    <div class="mini-bar" id="miniBar">
-      <span class="mini-grip" aria-hidden="true"><i></i><i></i><i></i></span>
-      <span class="mini-title">Chat 小窗</span>
-      <span class="mini-hint">拖动标题栏 · 拖右下角调整大小</span>
-      <button class="mini-close" id="miniClose" type="button" title="收回小窗" aria-label="收回小窗">
-        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-      </button>
-    </div>
-    <div class="mini-slot" id="miniSlot"></div>
-    <button class="mini-resize" id="miniResize" type="button" aria-label="调整小窗大小" title="拖动调整大小">
-      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M13 4L4 13M13 8l-5 5M13 12l-1 1" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-    </button>
-  </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden><span id="toastText"></span></div>
 </div>

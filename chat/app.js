@@ -949,7 +949,6 @@ function bindPopTriggers() {
     if (e.key === "Escape") {
       if (state.pop) { closePop(); return; }
       if (isMobileLayout() && mobilePanelOpen()) { setMobilePanel("", false); return; }
-      if (isMiniOpen()) { setMiniMode(false); return; }
       if (state.busy) stop();
     }
   });
@@ -1222,9 +1221,8 @@ function mobilePanelOpen() {
 function syncPanels() {
   var app = $("#app");
   var mobile = isMobileLayout();
-  var mini = app.classList.contains("mini-open");
-  var sessionsOpen = !mini && (mobile ? app.classList.contains("mobile-sessions-open") : !app.classList.contains("side-off"));
-  var settingsOpen = !mini && (mobile ? app.classList.contains("mobile-settings-open") : !$("#settingsPanel").hidden && !app.classList.contains("set-off"));
+  var sessionsOpen = mobile ? app.classList.contains("mobile-sessions-open") : !app.classList.contains("side-off");
+  var settingsOpen = mobile ? app.classList.contains("mobile-settings-open") : !$("#settingsPanel").hidden && !app.classList.contains("set-off");
   app.classList.toggle("side-off", !sessionsOpen);
   app.classList.toggle("set-off", !settingsOpen);
   [["#sessions", sessionsOpen], ["#settingsPanel", settingsOpen]].forEach(function (entry) {
@@ -1246,197 +1244,6 @@ function syncPanels() {
   toggle.setAttribute("aria-expanded", settingsOpen ? "true" : "false");
   toggle.title = settingsOpen ? "收起设置栏" : "展开设置栏";
   toggle.setAttribute("aria-label", toggle.title);
-}
-
-var miniHome = null;
-
-function isMiniOpen() {
-  return $("#app").classList.contains("mini-open");
-}
-
-function miniViewport() {
-  var viewport = window.visualViewport;
-  return {
-    width: viewport ? viewport.width : window.innerWidth,
-    height: viewport ? viewport.height : window.innerHeight,
-    left: viewport ? viewport.offsetLeft : 0,
-    top: viewport ? viewport.offsetTop : 0
-  };
-}
-
-function clampMiniWindow() {
-  if (!isMiniOpen()) return;
-  var win = $("#miniWindow");
-  var viewport = miniViewport();
-  var rect = win.getBoundingClientRect();
-  var left = Math.max(viewport.left + 8, Math.min(rect.left, viewport.left + viewport.width - rect.width - 8));
-  var top = Math.max(viewport.top + 8, Math.min(rect.top, viewport.top + viewport.height - rect.height - 8));
-  win.style.left = Math.round(left) + "px";
-  win.style.top = Math.round(top) + "px";
-  win.style.right = "auto";
-  win.style.bottom = "auto";
-}
-
-function setMiniMode(open) {
-  var app = $("#app");
-  var win = $("#miniWindow");
-  var main = $("#chatMain");
-  var toggle = $("#miniToggle");
-  var shouldOpen = typeof open === "boolean" ? open : !isMiniOpen();
-  if (shouldOpen === isMiniOpen()) return;
-
-  if (shouldOpen) {
-    // 移动主区而不是复制消息 DOM，避免流式回答、滚动位置和输入状态分叉。
-    if (!miniHome) {
-      var placeholder = el("div", { class: "mini-placeholder", text: "对话已在小窗中打开" });
-      main.parentNode.insertBefore(placeholder, main);
-      miniHome = { parent: main.parentNode, placeholder: placeholder };
-      $("#miniSlot").appendChild(main);
-    }
-    closePop();
-    if (mobilePanelOpen()) setMobilePanel("", false);
-    app.classList.add("mini-open");
-    win.hidden = false;
-    toggle.classList.add("on");
-    toggle.setAttribute("aria-expanded", "true");
-    toggle.title = "收回小窗（Ctrl+Shift+M）";
-    toggle.setAttribute("aria-label", toggle.title);
-    syncPanels();
-    clampMiniWindow();
-    $("#miniClose").focus({ preventScroll: true });
-  } else {
-    if (miniHome) {
-      miniHome.parent.insertBefore(main, miniHome.placeholder);
-      miniHome.placeholder.remove();
-      miniHome = null;
-    }
-    app.classList.remove("mini-open");
-    win.hidden = true;
-    // 打开小窗时为了隔离背景临时收起两侧栏；收回后按原先保存的桌面偏好恢复，
-    // 手机则继续保持抽屉关闭，避免把一次小窗操作误写成布局设置。
-    app.classList.toggle("side-off", isMobileLayout() || state.settings.sidebar === false);
-    app.classList.toggle("set-off", isMobileLayout() || state.settings.settingsOpen !== true);
-    toggle.classList.remove("on");
-    toggle.setAttribute("aria-expanded", "false");
-    toggle.title = "打开小窗（Ctrl+Shift+M）";
-    toggle.setAttribute("aria-label", toggle.title);
-    syncPanels();
-    autoGrow();
-    paintScrollBar();
-    if (state.follow) scrollBottom(true);
-    toggle.focus({ preventScroll: true });
-  }
-}
-
-function bindMiniWindow() {
-  var win = $("#miniWindow");
-  var bar = $("#miniBar");
-  var dragging = false;
-  var dragOffsetX = 0;
-  var dragOffsetY = 0;
-  var desktopSize = null;
-
-  $("#miniToggle").addEventListener("click", function () { setMiniMode(); });
-  $("#miniClose").addEventListener("click", function () { setMiniMode(false); });
-  bar.addEventListener("pointerdown", function (event) {
-    if (event.target.closest("button")) return;
-    var rect = win.getBoundingClientRect();
-    dragging = true;
-    dragOffsetX = event.clientX - rect.left;
-    dragOffsetY = event.clientY - rect.top;
-    bar.setPointerCapture?.(event.pointerId);
-    bar.classList.add("dragging");
-    event.preventDefault();
-  });
-  bar.addEventListener("pointermove", function (event) {
-    if (!dragging) return;
-    var viewport = miniViewport();
-    var rect = win.getBoundingClientRect();
-    var left = Math.max(viewport.left + 8, Math.min(event.clientX - dragOffsetX, viewport.left + viewport.width - rect.width - 8));
-    var top = Math.max(viewport.top + 8, Math.min(event.clientY - dragOffsetY, viewport.top + viewport.height - rect.height - 8));
-    win.style.left = Math.round(left) + "px";
-    win.style.top = Math.round(top) + "px";
-    win.style.right = "auto";
-    win.style.bottom = "auto";
-  });
-  function stopDragging() {
-    if (!dragging) return;
-    dragging = false;
-    bar.classList.remove("dragging");
-  }
-  bar.addEventListener("pointerup", stopDragging);
-  bar.addEventListener("pointercancel", stopDragging);
-  mobileLayout.addEventListener("change", function () {
-    if (isMobileLayout()) {
-      win.style.left = "";
-      win.style.top = "";
-      win.style.right = "";
-      win.style.bottom = "";
-      win.style.width = "";
-      win.style.height = "";
-    } else {
-      win.style.left = "";
-      win.style.top = "";
-      win.style.right = "";
-      win.style.bottom = "";
-      if (desktopSize) {
-        win.style.width = Math.round(desktopSize.width) + "px";
-        win.style.height = Math.round(desktopSize.height) + "px";
-      }
-    }
-    requestAnimationFrame(function () { clampMiniWindow(); });
-  });
-  var resizeHandle = $("#miniResize");
-  var resizing = false;
-  var resizeStart = null;
-  resizeHandle.addEventListener("pointerdown", function (event) {
-    if (isMobileLayout()) return;
-    var rect = win.getBoundingClientRect();
-    resizing = true;
-    resizeStart = { x: event.clientX, y: event.clientY, width: rect.width, height: rect.height };
-    resizeHandle.setPointerCapture?.(event.pointerId);
-    event.preventDefault();
-  });
-  resizeHandle.addEventListener("pointermove", function (event) {
-    if (!resizing || !resizeStart) return;
-    var viewport = miniViewport();
-    var width = Math.max(320, Math.min(viewport.width - 16, resizeStart.width + event.clientX - resizeStart.x));
-    var height = Math.max(280, Math.min(viewport.height - 16, resizeStart.height + event.clientY - resizeStart.y));
-    win.style.width = Math.round(width) + "px";
-    win.style.height = Math.round(height) + "px";
-    desktopSize = { width: width, height: height };
-    clampMiniWindow();
-  });
-  function stopResizing() {
-    resizing = false;
-    resizeStart = null;
-  }
-  resizeHandle.addEventListener("pointerup", stopResizing);
-  resizeHandle.addEventListener("pointercancel", stopResizing);
-  // 原生 resize 不会触发 window.resize；监听容器本身，保证输入框和滚动条跟手重排。
-  if (window.ResizeObserver) {
-    new ResizeObserver(function () {
-      if (!isMiniOpen()) return;
-      if (!isMobileLayout()) {
-        var rect = win.getBoundingClientRect();
-        desktopSize = { width: rect.width, height: rect.height };
-      }
-      autoGrow();
-      paintScrollBar();
-      if (state.follow) scrollBottom(true);
-    }).observe(win);
-  }
-  window.addEventListener("resize", clampMiniWindow);
-  if (window.visualViewport) {
-    window.visualViewport.addEventListener("resize", clampMiniWindow);
-    window.visualViewport.addEventListener("scroll", clampMiniWindow);
-  }
-  document.addEventListener("keydown", function (event) {
-    if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "m") {
-      event.preventDefault();
-      setMiniMode();
-    }
-  });
 }
 
 function setMobilePanel(panel, open) {
@@ -2967,7 +2774,6 @@ function bindUI() {
   bindResponsiveLayout();
   bindAttachments();
   bindResizers();
-  bindMiniWindow();
 
   // 滚动条：滚时浮现，停手淡出；可拖动
   $("#stream").addEventListener("scroll", flashScrollBar, { passive: true });
